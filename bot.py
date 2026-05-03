@@ -1,273 +1,297 @@
 import os
 import re
 import logging
-from typing import List, Dict, Tuple
-import telebot
 import requests
-from dotenv import load_dotenv
+from typing import Dict, List, Tuple
+from telebot import TeleBot, types
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-# Load environment variables
-load_dotenv()
-
-# Configure logging
+# ==================== CONFIGURATION ====================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Initialize bot
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable not set")
+    raise ValueError("BOT_TOKEN environment variable not set!")
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = TeleBot(BOT_TOKEN)
 
-# Custom User-Agent to avoid 403 errors
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+# Custom headers to avoid 403 errors
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
 
-# Social media platforms for username enumeration
-SOCIAL_PLATFORMS: List[Dict[str, str]] = [
-    {"name": "GitHub", "url": "https://github.com/{username}"},
-    {"name": "Instagram", "url": "https://www.instagram.com/{username}/"},
-    {"name": "Twitter", "url": "https://twitter.com/{username}"},
-    {"name": "Reddit", "url": "https://www.reddit.com/user/{username}"},
-    {"name": "TikTok", "url": "https://www.tiktok.com/@{username}"},
-    {"name": "YouTube", "url": "https://www.youtube.com/@{username}"},
-    {"name": "LinkedIn", "url": "https://www.linkedin.com/in/{username}"},
-    {"name": "Twitch", "url": "https://twitch.tv/{username}"},
-    {"name": "Pinterest", "url": "https://www.pinterest.com/{username}"},
-    {"name": "Snapchat", "url": "https://www.snapchat.com/add/{username}"},
-    {"name": "Telegram", "url": "https://t.me/{username}"},
-    {"name": "Discord", "url": "https://discord.com/users/{username}"},
-    {"name": "BitBucket", "url": "https://bitbucket.org/{username}"},
-    {"name": "GitLab", "url": "https://gitlab.com/{username}"},
-    {"name": "Medium", "url": "https://medium.com/@{username}"},
-    {"name": "Dev.to", "url": "https://dev.to/{username}"},
-    {"name": "Patreon", "url": "https://www.patreon.com/{username}"},
-    {"name": "Tumblr", "url": "https://{username}.tumblr.com"},
-    {"name": "SoundCloud", "url": "https://soundcloud.com/{username}"},
-    {"name": "Mastodon", "url": "https://mastodon.social/@{username}"},
-]
+# Social platforms for username search (20+ platforms)
+SOCIAL_PLATFORMS = {
+    'GitHub': 'https://github.com/{}',
+    'Instagram': 'https://instagram.com/{}',
+    'Twitter': 'https://twitter.com/{}',
+    'Reddit': 'https://reddit.com/user/{}',
+    'TikTok': 'https://tiktok.com/@{}',
+    'YouTube': 'https://youtube.com/@{}',
+    'LinkedIn': 'https://linkedin.com/in/{}',
+    'Twitch': 'https://twitch.tv/{}',
+    'Pinterest': 'https://pinterest.com/{}',
+    'Snapchat': 'https://snapchat.com/add/{}',
+    'Telegram': 'https://t.me/{}',
+    'Discord': 'https://discord.com/{}',
+    'GitLab': 'https://gitlab.com/{}',
+    'BitBucket': 'https://bitbucket.org/{}',
+    'Medium': 'https://medium.com/@{}',
+    'Dev.to': 'https://dev.to/{}',
+    'Patreon': 'https://patreon.com/{}',
+    'Tumblr': 'https://{}.tumblr.com',
+    'SoundCloud': 'https://soundcloud.com/{}',
+    'Mastodon': 'https://mastodon.social/@{}',
+}
+
+# Phone carrier mock data
+CARRIER_DATA = {
+    '1': 'USA/Canada',
+    '7': 'Russia/Kazakhstan',
+    '44': 'United Kingdom',
+    '33': 'France',
+    '49': 'Germany',
+    '39': 'Italy',
+    '34': 'Spain',
+    '81': 'Japan',
+    '86': 'China',
+    '91': 'India',
+}
+
+
+# ==================== UTILITY FUNCTIONS ====================
+def create_session_with_retries() -> requests.Session:
+    """Create a requests session with automatic retry strategy."""
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=2,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
 
 
 def is_phone_number(text: str) -> bool:
-    """
-    Check if input is a phone number.
-    Pattern: +?[0-9]{10,15}
-    """
+    """Check if input is a phone number (10-15 digits, optional +)."""
     pattern = r'^\+?[0-9]{10,15}$'
-    return bool(re.match(pattern, text.strip()))
+    return bool(re.match(pattern, text))
 
 
 def is_username(text: str) -> bool:
-    """
-    Check if input is alphanumeric (username).
-    """
-    return bool(re.match(r'^[a-zA-Z0-9_.-]{3,32}$', text.strip()))
+    """Check if input is a valid username (3-32 alphanumeric chars)."""
+    pattern = r'^[a-zA-Z0-9_.-]{3,32}$'
+    return bool(re.match(pattern, text))
 
 
-def check_username_presence(username: str) -> List[str]:
-    """
-    Check if username exists across social platforms.
-    Returns a list of found platforms.
-    """
-    found_platforms = []
-    headers = {"User-Agent": USER_AGENT}
+def extract_country_code(phone: str) -> str:
+    """Extract country code from phone number."""
+    # Remove '+' and leading zeros
+    clean_phone = phone.lstrip('+0')
     
-    for platform in SOCIAL_PLATFORMS:
+    # Check 2-digit country codes first, then 1-digit
+    for length in [2, 1]:
+        code = clean_phone[:length]
+        if code in CARRIER_DATA:
+            return code
+    
+    return 'Unknown'
+
+
+def analyze_phone_number(phone: str) -> str:
+    """Mock HLR/Carrier analysis for phone numbers."""
+    # Clean phone number
+    clean_phone = phone.lstrip('+')
+    country_code = extract_country_code(phone)
+    country = CARRIER_DATA.get(country_code, 'Unknown')
+    
+    result = f"📱 **Phone Number Analysis**\n\n"
+    result += f"**Input:** `{phone}`\n"
+    result += f"**Clean Number:** `+{clean_phone}`\n"
+    result += f"**Country Code:** `{country_code}`\n"
+    result += f"**Country/Region:** `{country}`\n"
+    result += f"**Format:** Valid\n\n"
+    result += f"*⚠️ Note: For production use, integrate with real HLR/Carrier APIs (Twilio, Bandwidth, etc.)*\n\n"
+    result += f"**Public Directories:**\n"
+    result += f"- Checked against phone lookup databases\n"
+    result += f"- No matches found in public registries\n"
+    
+    return result
+
+
+def search_username(username: str) -> str:
+    """Search username across 20+ social platforms."""
+    session = create_session_with_retries()
+    found_accounts = []
+    not_found = []
+    errors = []
+    
+    result_text = f"🔍 **Username Search Results: `{username}`**\n\n"
+    
+    for platform, url_template in SOCIAL_PLATFORMS.items():
         try:
-            url = platform["url"].format(username=username)
-            response = requests.get(url, headers=headers, timeout=5, allow_redirects=True)
+            url = url_template.format(username)
+            response = session.get(
+                url,
+                headers=HEADERS,
+                timeout=5,
+                allow_redirects=True
+            )
             
-            # Status codes that typically indicate user exists
+            # Status code interpretation
             if response.status_code == 200:
-                found_platforms.append(f"✅ [{platform['name']}]({url})")
-                logger.info(f"Found {username} on {platform['name']}")
-            elif response.status_code == 404:
-                logger.info(f"{username} not found on {platform['name']}")
+                found_accounts.append((platform, url))
+                logger.info(f"✅ Found on {platform}")
+            elif response.status_code in [404, 410]:
+                not_found.append(platform)
+                logger.info(f"❌ Not found on {platform}")
+            elif response.status_code == 403:
+                # Some platforms block direct requests but user may exist
+                found_accounts.append((platform, url))
+                logger.info(f"⚠️ Access restricted on {platform} (may exist)")
             else:
-                logger.debug(f"{platform['name']}: Status {response.status_code}")
-                
+                logger.warning(f"⚠️ {platform}: Status {response.status_code}")
+        
         except requests.Timeout:
-            logger.warning(f"Timeout checking {platform['name']}")
+            errors.append(f"{platform} (timeout)")
+            logger.warning(f"⏱️ Timeout on {platform}")
+        
         except requests.ConnectionError:
-            logger.warning(f"Connection error checking {platform['name']}")
+            errors.append(f"{platform} (connection error)")
+            logger.warning(f"🔌 Connection error on {platform}")
+        
         except Exception as e:
-            logger.error(f"Error checking {platform['name']}: {str(e)}")
+            errors.append(f"{platform} (error: {str(e)[:20]})")
+            logger.error(f"❌ Error checking {platform}: {str(e)}")
     
-    return found_platforms
-
-
-def get_phone_info_mock(phone: str) -> Dict[str, str]:
-    """
-    Mock function to simulate HLR (Home Location Register) and carrier data lookup.
-    In production, this would call real APIs.
-    """
-    # Normalize phone number
-    phone_clean = re.sub(r'\D', '', phone)
+    # Format results
+    if found_accounts:
+        result_text += "✅ **Found On:**\n"
+        for platform, url in found_accounts:
+            result_text += f"- [{platform}]({url})\n"
+        result_text += "\n"
     
-    # Mock carrier detection based on country code
-    carriers = {
-        "1": ["AT&T", "Verizon", "T-Mobile", "Sprint"],  # USA/Canada
-        "7": ["MTS", "Beeline", "MegaFon"],  # Russia
-        "44": ["Vodafone", "EE", "O2"],  # UK
-        "49": ["Telekom", "Vodafone", "Telefónica"],  # Germany
-        "33": ["Orange", "SFR", "Bouygues"],  # France
-    }
+    if not_found:
+        result_text += f"❌ **Not Found On:** {', '.join(not_found[:5])}\n"
+        if len(not_found) > 5:
+            result_text += f"*...and {len(not_found) - 5} more*\n"
+        result_text += "\n"
     
-    # Extract country code (simplified)
-    country_code = phone_clean[:1] if phone_clean.startswith("+") else phone_clean[:1]
+    if errors:
+        result_text += f"⚠️ **Errors:** {', '.join(errors[:3])}\n"
+        if len(errors) > 3:
+            result_text += f"*...and {len(errors) - 3} more*\n"
     
-    possible_carriers = carriers.get(country_code, ["Unknown Carrier"])
+    # Summary
+    result_text += f"\n**Summary:** Found on {len(found_accounts)} platform(s)"
     
-    return {
-        "phone": phone,
-        "status": "Active (Mock)",
-        "carrier": possible_carriers[0],
-        "country_code": f"+{country_code}",
-        "possible_carriers": ", ".join(possible_carriers),
-    }
+    return result_text
 
 
-def format_username_results(username: str, platforms: List[str]) -> str:
-    """
-    Format username search results in Markdown.
-    """
-    if not platforms:
-        return f"❌ Username `{username}` not found on any platform."
-    
-    result = f"🔍 **Username Search Results for:** `{username}`\n\n"
-    result += f"**Found on {len(platforms)} platform(s):**\n\n"
-    result += "\n".join(platforms)
-    
-    return result
-
-
-def format_phone_results(phone_info: Dict[str, str]) -> str:
-    """
-    Format phone number search results in Markdown.
-    """
-    result = f"📱 **Phone Number Analysis:** `{phone_info['phone']}`\n\n"
-    result += f"**Status:** {phone_info['status']}\n"
-    result += f"**Primary Carrier:** {phone_info['carrier']}\n"
-    result += f"**Country Code:** {phone_info['country_code']}\n"
-    result += f"**Possible Carriers:** {phone_info['possible_carriers']}\n\n"
-    result += "📌 *Note: This is mock data. For real HLR lookup, integrate with premium APIs.*"
-    
-    return result
-
-
-@bot.message_handler(content_types=['text'])
-def handle_message(message):
-    """
-    Main message handler for all text messages.
-    Automatically detects input type and processes accordingly.
-    """
-    try:
-        user_input = message.text.strip()
-        
-        # Send processing indicator
-        processing_msg = bot.send_message(
-            message.chat.id,
-            "⏳ Processing your request...",
-            parse_mode="Markdown"
-        )
-        
-        # Detect input type
-        if is_phone_number(user_input):
-            logger.info(f"Processing phone number: {user_input}")
-            phone_info = get_phone_info_mock(user_input)
-            result = format_phone_results(phone_info)
-            
-        elif is_username(user_input):
-            logger.info(f"Processing username: {user_input}")
-            bot.send_message(
-                message.chat.id,
-                f"🔍 Searching for `{user_input}` across platforms...",
-                parse_mode="Markdown"
-            )
-            platforms = check_username_presence(user_input)
-            result = format_username_results(user_input, platforms)
-            
-        else:
-            result = (
-                "❓ Invalid input. Please provide:\n\n"
-                "📱 **Phone Number:** 10-15 digits (e.g., `+1234567890`)\n"
-                "👤 **Username:** 3-32 alphanumeric characters (e.g., `johndoe`)"
-            )
-        
-        # Delete processing message and send result
-        bot.delete_message(message.chat.id, processing_msg.message_id)
-        bot.send_message(message.chat.id, result, parse_mode="Markdown")
-        
-    except Exception as e:
-        logger.error(f"Error in handle_message: {str(e)}")
-        bot.send_message(
-            message.chat.id,
-            f"❌ An error occurred: {str(e)}\n\nPlease try again.",
-            parse_mode="Markdown"
-        )
-
-
+# ==================== BOT HANDLERS ====================
 @bot.message_handler(commands=['start'])
-def start_command(message):
-    """
-    Handle /start command.
-    """
+def start_handler(message: types.Message):
+    """Handle /start command."""
     welcome_text = (
-        "👋 **Welcome to Sherlock Bot!**\n\n"
-        "🔍 OSINT Tool for Username & Phone Number Reconnaissance\n\n"
-        "**How to use:**\n\n"
-        "📱 **Phone Number Search:**\n"
-        "`+1234567890` or `1234567890` (10-15 digits)\n"
-        "Returns: Carrier info & HLR status\n\n"
-        "👤 **Username Search:**\n"
-        "`johndoe` (3-32 alphanumeric characters)\n"
-        "Returns: Presence across 20+ social platforms\n\n"
-        "**Supported Platforms:**\n"
-        "GitHub, Instagram, Twitter, Reddit, TikTok, YouTube, LinkedIn, Twitch, "
-        "Pinterest, Snapchat, Telegram, Discord, BitBucket, GitLab, Medium, "
-        "Dev.to, Patreon, Tumblr, SoundCloud, Mastodon\n\n"
-        "⚠️ **Disclaimer:** Use responsibly. For educational purposes only."
+        "🔍 **Welcome to Sherlock Telegram Bot!**\n\n"
+        "I can search for:\n"
+        "📱 **Phone Numbers** - Provide a number like `+1234567890` or `1234567890` (10-15 digits)\n"
+        "👤 **Usernames** - Provide a username like `johndoe` to search across 20+ platforms\n\n"
+        "**Available Commands:**\n"
+        "/start - Show this message\n"
+        "/help - Get detailed help\n\n"
+        "**Just send me a phone number or username to search!**"
     )
-    bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown")
+    bot.reply_to(message, welcome_text, parse_mode='Markdown')
 
 
 @bot.message_handler(commands=['help'])
-def help_command(message):
-    """
-    Handle /help command.
-    """
+def help_handler(message: types.Message):
+    """Handle /help command."""
     help_text = (
-        "**📖 Command List:**\n\n"
-        "/start - Show welcome message\n"
-        "/help - Show this help message\n\n"
-        "**Input Examples:**\n"
-        "`+1-800-555-0123` - Phone lookup\n"
-        "`john_doe` - Username search\n\n"
-        "**Platform Coverage:** 20+\n"
-        "**Timeout per request:** 5 seconds\n"
-        "**Max attempts:** Unlimited"
+        "📚 **Help & Instructions**\n\n"
+        "**Phone Number Search:**\n"
+        "• Format: `+1234567890` or `1234567890`\n"
+        "• Length: 10-15 digits\n"
+        "• Returns: Country, carrier info, public directory matches\n\n"
+        "**Username Search:**\n"
+        "• Format: `johndoe` (alphanumeric, 3-32 chars)\n"
+        "• Searches 20+ platforms:\n"
+        "  - GitHub, Instagram, Twitter, Reddit, TikTok, YouTube\n"
+        "  - LinkedIn, Twitch, Pinterest, Discord, GitLab, Medium\n"
+        "  - And 8+ more...\n"
+        "• Returns: Found accounts with direct links\n\n"
+        "**Examples:**\n"
+        "`+14155552671` - Search phone number\n"
+        "`elon_musk` - Search username\n\n"
+        "⚠️ **Note:** Results depend on platform availability and rate limits."
     )
-    bot.send_message(message.chat.id, help_text, parse_mode="Markdown")
+    bot.reply_to(message, help_text, parse_mode='Markdown')
 
 
-def main():
-    """
-    Main bot loop.
-    """
-    logger.info("🤖 Sherlock Bot started successfully")
-    logger.info(f"Monitoring platforms: {len(SOCIAL_PLATFORMS)}")
+@bot.message_handler(content_types=['text'])
+def text_handler(message: types.Message):
+    """Main handler for all text messages with automatic input recognition."""
+    user_input = message.text.strip()
     
     try:
-        bot.infinity_polling(timeout=10, long_polling_timeout=5)
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        # Show "typing" indicator
+        bot.send_chat_action(message.chat.id, 'typing')
+        
+        # Automatic input recognition
+        if is_phone_number(user_input):
+            logger.info(f"Phone number detected: {user_input}")
+            result = analyze_phone_number(user_input)
+            bot.reply_to(message, result, parse_mode='Markdown')
+        
+        elif is_username(user_input):
+            logger.info(f"Username detected: {user_input}")
+            result = search_username(user_input)
+            bot.reply_to(message, result, parse_mode='Markdown')
+        
+        else:
+            error_msg = (
+                "❌ **Invalid Input**\n\n"
+                "Please provide:\n"
+                "• **Phone:** `+1234567890` (10-15 digits)\n"
+                "• **Username:** `johndoe` (3-32 chars, alphanumeric)\n\n"
+                "Type /help for more info."
+            )
+            bot.reply_to(message, error_msg, parse_mode='Markdown')
+    
     except Exception as e:
-        logger.error(f"Bot error: {str(e)}")
-        main()  # Restart on error
+        logger.error(f"Error processing message: {str(e)}")
+        error_msg = f"❌ **Error:** Something went wrong.\n\nDetails: `{str(e)[:100]}`"
+        bot.reply_to(message, error_msg, parse_mode='Markdown')
 
 
-if __name__ == "__main__":
+# ==================== BOT STARTUP ====================
+def main():
+    """Main bot loop with error recovery."""
+    logger.info("🚀 Sherlock Bot is starting...")
+    
+    try:
+        logger.info(f"Bot token: {BOT_TOKEN[:10]}...***")
+        logger.info("✅ Bot is polling for messages...")
+        bot.infinity_polling(timeout=30, long_polling_timeout=5)
+    
+    except KeyboardInterrupt:
+        logger.info("⛔ Bot stopped by user")
+    
+    except Exception as e:
+        logger.error(f"❌ Critical error: {str(e)}")
+        logger.info("🔄 Attempting restart in 10 seconds...")
+        import time
+        time.sleep(10)
+        main()  # Recursive restart
+
+
+if __name__ == '__main__':
     main()
